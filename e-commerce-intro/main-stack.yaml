@@ -1,0 +1,584 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Demo microservice stack: Orders/Users (ECS Fargate + RDS), Products (ECS Fargate + DynamoDB),
+  presigned-URL Lambda + API Gateway + S3, and Amplify-hosted React frontend.
+  NOT hardened for production - wide-open security group, public RDS, no deletion protection.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Use your default VPC's public subnets (need at least 2, in different AZs)
+
+  OrdersImage:
+    Type: String
+    Description: Full ECR image URI:tag for the Orders service
+  UsersImage:
+    Type: String
+    Description: Full ECR image URI:tag for the Users service
+  ProductsImage:
+    Type: String
+    Description: Full ECR image URI:tag for the Products service
+
+  ContainerPort:
+    Type: Number
+    Default: 5000
+
+  DBUsername:
+    Type: String
+    Default: dbadmin
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Branch name used as the Amplify deployment target
+
+Resources:
+
+  ### --- Shared networking (demo only) ---
+  OpenSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Demo SG - all traffic open. Do not reuse for production.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for demo RDS instances
+      SubnetIds: !Ref SubnetIds
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}'
+      RetentionInDays: 3
+
+  ### --- ECS Cluster ---
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ProductsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ProductsTable.Arn
+        - PolicyName: ReadImagesBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${ImagesBucket.Arn}/*'
+
+  ### --- Application Load Balancer (path-based routing to all 3 services) ---
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Subnets: !Ref SubnetIds
+      SecurityGroups: [!Ref OpenSecurityGroup]
+      Scheme: internet-facing
+      Type: application
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '404'
+            ContentType: text/plain
+            MessageBody: 'Not found'
+
+  OrdersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+
+  UsersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+
+  ProductsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+
+  OrdersListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/orders*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OrdersTargetGroup
+
+  UsersListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ['/users*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref UsersTargetGroup
+
+  ProductsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values: ['/products*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ProductsTargetGroup
+
+  ### --- Orders service (Fargate + RDS) ---
+  OrdersDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}-orders-db-secret'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DBUsername}"}'
+        GenerateStringKey: password
+        ExcludePunctuation: true
+        PasswordLength: 20
+
+  OrdersTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadOrdersDBSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref OrdersDBSecret
+
+  OrdersDBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: postgres
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${OrdersDBSecret}:SecretString:password}}'
+      DBName: orders
+      PubliclyAccessible: true
+      DeletionProtection: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref OpenSecurityGroup]
+      BackupRetentionPeriod: 0
+
+  OrdersTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-orders'
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ExecutionRole
+      TaskRoleArn: !Ref OrdersTaskRole
+      ContainerDefinitions:
+        - Name: orders
+          Image: !Ref OrdersImage
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Environment:
+            - Name: DATABASE_HOST
+              Value: !GetAtt OrdersDBInstance.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt OrdersDBInstance.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: orders
+            - Name: DATABASE_USER
+              Value: !Ref DBUsername
+            - Name: DATABASE_SECRET_ARN
+              Value: !Ref OrdersDBSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: orders
+
+  OrdersService:
+    Type: AWS::ECS::Service
+    DependsOn: OrdersListenerRule
+    Properties:
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref OrdersTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref OpenSecurityGroup]
+      LoadBalancers:
+        - ContainerName: orders
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref OrdersTargetGroup
+
+  ### --- Users service (Fargate + RDS) ---
+  UsersDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}-users-db-secret'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DBUsername}"}'
+        GenerateStringKey: password
+        ExcludePunctuation: true
+        PasswordLength: 20
+
+  UsersTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadUsersDBSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref UsersDBSecret
+
+  UsersDBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: postgres
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${UsersDBSecret}:SecretString:password}}'
+      DBName: users
+      PubliclyAccessible: true
+      DeletionProtection: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref OpenSecurityGroup]
+      BackupRetentionPeriod: 0
+
+  UsersTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-users'
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ExecutionRole
+      TaskRoleArn: !Ref UsersTaskRole
+      ContainerDefinitions:
+        - Name: users
+          Image: !Ref UsersImage
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Environment:
+            - Name: DATABASE_HOST
+              Value: !GetAtt UsersDBInstance.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt UsersDBInstance.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: users
+            - Name: DATABASE_USER
+              Value: !Ref DBUsername
+            - Name: DATABASE_SECRET_ARN
+              Value: !Ref UsersDBSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: users
+
+  UsersService:
+    Type: AWS::ECS::Service
+    DependsOn: UsersListenerRule
+    Properties:
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref UsersTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref OpenSecurityGroup]
+      LoadBalancers:
+        - ContainerName: users
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref UsersTargetGroup
+
+  ### --- Products service (Fargate + DynamoDB) ---
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-products'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ProductId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ProductId
+          KeyType: HASH
+
+  ProductsTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-products'
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ExecutionRole
+      TaskRoleArn: !Ref ProductsTaskRole
+      ContainerDefinitions:
+        - Name: products
+          Image: !Ref ProductsImage
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Environment:
+            - Name: TABLE_NAME
+              Value: !Ref ProductsTable
+            - Name: KEY_NAME
+              Value: ProductId
+            - Name: BUCKET_NAME
+              Value: !Ref ImagesBucket
+            - Name: QUEUE_URL
+              Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: products
+
+  ProductsService:
+    Type: AWS::ECS::Service
+    DependsOn: ProductsListenerRule
+    Properties:
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ProductsTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref OpenSecurityGroup]
+      LoadBalancers:
+        - ContainerName: products
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref ProductsTargetGroup
+
+  ### --- CloudFront in front of the ALB (gives HTTPS via *.cloudfront.net, no custom domain needed) ---
+  ALBCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AWS::StackName} - HTTPS front door for the ALB'
+        Origins:
+          - Id: alb-origin
+            DomainName: !GetAtt ALB.DNSName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+        DefaultCacheBehavior:
+          TargetOriginId: alb-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+          ForwardedValues:
+            QueryString: true
+            Headers: ['*']
+            Cookies:
+              Forward: all
+
+  ### --- Image upload: S3 + presigned URL Lambda + HTTP API ---
+  ImagesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ['*']
+            AllowedHeaders: ['*']
+
+  PresignedUrlFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3PresignAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub '${ImagesBucket.Arn}/*'
+
+  PresignedUrlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-presign'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt PresignedUrlFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImagesBucket
+      Code:
+        ZipFile: |
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+          const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+          const s3 = new S3Client({});
+          exports.handler = async (event) => {
+            const qs = event.queryStringParameters || {};
+            const key = qs.key || `uploads/${Date.now()}.jpg`;
+            const command = new PutObjectCommand({ Bucket: process.env.BUCKET_NAME, Key: key });
+            const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+            return {
+              statusCode: 200,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ uploadUrl: url, key }),
+            };
+          };
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      ProtocolType: HTTP
+      Target: !GetAtt PresignedUrlFunction.Arn
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PresignedUrlFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+
+### --- Frontend: Amplify ---
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub '${AWS::StackName}-frontend'
+      Platform: WEB
+
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: !Ref GitHubBranch
+      EnableAutoBuild: false
+
+Outputs:
+  ALBUrl:
+    Value: !Sub 'http://${ALB.DNSName}'
+  ApiHttpsUrl:
+    Value: !Sub 'https://${ALBCloudFrontDistribution.DomainName}'
+    Description: Use this (not ALBUrl) as the frontend's API base - HTTPS, matches Amplify's protocol
+  PresignApiUrl:
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  ImagesBucketName:
+    Value: !Ref ImagesBucket
+  OrdersDBEndpoint:
+    Value: !GetAtt OrdersDBInstance.Endpoint.Address
+  UsersDBEndpoint:
+    Value: !GetAtt UsersDBInstance.Endpoint.Address
+  ProductsTableName:
+    Value: !Ref ProductsTable
+  AmplifyAppId:
+    Value: !GetAtt AmplifyApp.AppId
+  AmplifyBranchName:
+    Value: !Ref GitHubBranch
+  AmplifyDefaultDomain:
+    Value: !Sub '${GitHubBranch}.${AmplifyApp.DefaultDomain}'
