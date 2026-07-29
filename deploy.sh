@@ -7,6 +7,11 @@ CONFIG_FILE="${1:?Usage: $0 <config-file>}"
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
+echo "DEBUG: CONFIG_FILE arg = $1"
+echo "DEBUG: sourcing from = ${CONFIG_FILE:-not set}"
+source "$1" || echo "ERROR: failed to source $1"
+echo "DEBUG: STACK_PREFIX after source = ${STACK_PREFIX}"
+
 : "${REGION:?Config must set REGION}"
 : "${STACK_PREFIX:?Config must set STACK_PREFIX}"
 
@@ -29,7 +34,7 @@ require_file() {
 push_initial_image() {
   local repo_uri="$1"        # full URI, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp-orders
   local dockerfile_path="$2"
-  local image_tag="${3:-initial}"
+  local image_tag="${3:-latest}"
 
   local registry="${repo_uri%%/*}"
   local region
@@ -40,10 +45,38 @@ push_initial_image() {
     | docker login --username AWS --password-stdin "$registry"
 
   echo "Building image for ${repo_uri}..."
-  docker build --platform linux/amd64 -t "${repo_uri}:${image_tag}" "$dockerfile_path"
+  docker build --platform linux/arm64 -t "${repo_uri}:${image_tag}" "$dockerfile_path"
 
   echo "Pushing ${repo_uri}:${image_tag}..."
   docker push "${repo_uri}:${image_tag}"
+}
+
+# --- Helper: add/replace a key in EXTRA_PARAM_OVERRIDES, skipping empty values ---
+set_param_override() {
+  local key="$1"
+  local value="$2"
+
+  if [[ -z "$value" ]]; then
+    return   # leave existing/placeholder value untouched if nothing new was found
+  fi
+
+  local new_array=()
+  local found=false
+
+  for item in "${EXTRA_PARAM_OVERRIDES[@]}"; do
+    if [[ "$item" == "${key}="* ]]; then
+      new_array+=("${key}=${value}")
+      found=true
+    else
+      new_array+=("$item")
+    fi
+  done
+
+  if [[ "$found" == false ]]; then
+    new_array+=("${key}=${value}")
+  fi
+
+  EXTRA_PARAM_OVERRIDES=("${new_array[@]}")
 }
 
 out() { # out <stack-name> <output-key>
@@ -72,14 +105,34 @@ if [ "${RUN_NETWORKING:-false}" = "true" ]; then
 fi
 
 VPC_ID=$(out "${STACK_PREFIX}-network" VPCId 2>/dev/null || echo "")
-PUBLIC_SUBNET_1_ID=$(out "${STACK_PREFIX}-network" PublicSubnet1Id 2>/dev/null || echo "")
-PUBLIC_SUBNET_2_ID=$(out "${STACK_PREFIX}-network" PublicSubnet2Id 2>/dev/null || echo "")
-PRIVATE_SUBNET_1_ID=$(out "${STACK_PREFIX}-network" PrivateSubnet1Id 2>/dev/null || echo "")
-PRIVATE_SUBNET_2_ID=$(out "${STACK_PREFIX}-network" PrivateSubnet1Id 2>/dev/null || echo "")
+PUBLIC_SUBNET_IDS=$(out "${STACK_PREFIX}-network" PublicSubnetIds 2>/dev/null || echo "")
+PRIVATE_SUBNET_IDS=$(out "${STACK_PREFIX}-network" PrivateSubnetIds 2>/dev/null || echo "")
 ALB_SECURITY_GROUP_ID=$(out "${STACK_PREFIX}-network" ALBSecurityGroupId 2>/dev/null || echo "")
 ECS_SECURITY_GROUP_ID=$(out "${STACK_PREFIX}-network" ECSSecurityGroupId 2>/dev/null || echo "")
 RDS_SECURITY_GROUP_ID=$(out "${STACK_PREFIX}-network" RDSSecurityGroupId 2>/dev/null || echo "")
 
+# --- Parallel arrays instead of associative array ---
+NETWORK_PARAM_NAMES=(
+  VpcId
+  PublicSubnetIds
+  PrivateSubnetIds
+  ALBSecurityGroupId
+  ECSSecurityGroupId
+  RDSSecurityGroupId
+)
+
+NETWORK_PARAM_VALUES=(
+  "$VPC_ID"
+  "$PUBLIC_SUBNET_IDS"
+  "$PRIVATE_SUBNET_IDS"
+  "$ALB_SECURITY_GROUP_ID"
+  "$ECS_SECURITY_GROUP_ID"
+  "$RDS_SECURITY_GROUP_ID"
+)
+
+for i in "${!NETWORK_PARAM_NAMES[@]}"; do
+  set_param_override "${NETWORK_PARAM_NAMES[$i]}" "${NETWORK_PARAM_VALUES[$i]}"
+done
 
 
 if [ "${RUN_ECR_BOOTSTRAP:-false}" = "true" ]; then
@@ -95,15 +148,26 @@ USERS_REPO=$(out "${STACK_PREFIX}-ecr" UsersRepoUri 2>/dev/null || echo "")
 PRODUCTS_REPO=$(out "${STACK_PREFIX}-ecr" ProductsRepoUri 2>/dev/null || echo "")
 
 if [[ "${PUSH_INITIAL_IMAGES:-false}" == "true" ]]; then
+  echo "== Pushing initial images =="
   for entry in "${INITIAL_IMAGE_SERVICES[@]}"; do
     service_name="${entry%%:*}"
     dockerfile_path="${entry#*:}"
-    repo_name="${STACK_PREFIX}-${service_name}"
+
+    # Resolve "orders" -> "ORDERS_REPO", "users" -> "USERS_REPO", etc.
+    var_name="$(echo "$service_name" | tr '[:lower:]' '[:upper:]')_REPO"
+    repo_uri="${!var_name}"
+
+    if [[ -z "$repo_uri" ]]; then
+      echo "Skipping ${service_name} — ${var_name} is empty (ECR stack may not exist yet)"
+      continue
+    fi
+
+    repo_name="${repo_uri##*/}"   # bare name, e.g. e-commerce-cicd-orders — only needed for list-images
 
     IMAGE_COUNT=$(aws ecr list-images --repository-name "$repo_name" --query 'length(imageIds)' --output text 2>/dev/null || echo "0")
 
     if [[ "$IMAGE_COUNT" == "0" ]]; then
-      push_initial_image "$repo_name" "$dockerfile_path" "initial"
+      push_initial_image "$repo_uri" "$dockerfile_path" "latest"   # <- full URI, not bare name
     else
       echo "Skipping ${repo_name} — image already exists."
     fi
@@ -137,38 +201,9 @@ if [ "${RUN_CODEBUILD:-false}" = "true" ]; then
   ./trigger-builds.sh "$ORDERS_PROJECT" "$USERS_PROJECT" "$PRODUCTS_PROJECT"
 fi
 
-# --- Loop through configured services and bootstrap-push if the repo is empty ---
-if [[ "${PUSH_INITIAL_IMAGES:-false}" == "true" ]]; then
-  for entry in "${INITIAL_IMAGE_SERVICES[@]}"; do
-    service_name="${entry%%:*}"
-    dockerfile_path="${entry#*:}"
+#
 
-    if [[ ! -f "${dockerfile_path}/Dockerfile" ]]; then
-      echo "ERROR: No Dockerfile found at ${dockerfile_path} — check INITIAL_IMAGE_SERVICES for ${service_name}"
-      exit 1
-    fi
-
-    var_name="$(echo "$service_name" | tr '[:lower:]' '[:upper:]')_REPO"
-    repo_uri="${!var_name}"
-
-    if [[ -z "$repo_uri" ]]; then
-      echo "Skipping ${service_name} — ${var_name} is empty (ECR stack may not exist yet)"
-      continue
-    fi
-
-    repo_name="${repo_uri##*/}"
-
-    IMAGE_COUNT=$(aws ecr list-images --repository-name "$repo_name" --query 'length(imageIds)' --output text 2>/dev/null || echo "0")
-
-    if [[ "$IMAGE_COUNT" == "0" ]]; then
-      push_initial_image "$repo_uri" "$dockerfile_path" "initial"
-    else
-      echo "Skipping ${repo_name} — image already exists."
-    fi
-  done
-fi
-
-echo "== Deploying main stack: ${TEMPLATE_FILE} (${STACK_PREFIX}-main) =="
+echo "== Deploying main stack: ${MAIN_TEMPLATE} (${STACK_PREFIX}-main) =="
 aws cloudformation deploy --region "$REGION" \
   --stack-name "${STACK_PREFIX}-main" \
   --template-file "$MAIN_TEMPLATE" \
