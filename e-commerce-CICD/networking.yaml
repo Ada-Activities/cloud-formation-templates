@@ -46,10 +46,10 @@ Resources:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: !Ref VpcCIDR
-      InstanceTenanch: default
-    Tags:
-        - Key: Name
-          Value: !Sub '${ServicePrefix}-vpc'
+      InstanceTenancy: default
+      Tags:
+          - Key: Name
+            Value: !Sub '${ServicePrefix}-vpc'
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -156,7 +156,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
 
   PrivateRouteTable:
-    type: AWS::EC2::RouteTable
+    Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
@@ -186,7 +186,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Allow inbound HTTP/HTTPS from internet
-      VpcId: !ref VPC
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -237,54 +237,40 @@ Outputs:
     Description: VPC ID
     Value: !Ref VPC
     Export:
-      Name: !Sub ${EnvironmentName}-VPCId
+      Name: !Sub ${ServicePrefix}-VPCId
 
-  PublicSubnet1Id:
-    Description: Public Subnet 1 ID (AZ1)
-    Value: !Ref PublicSubnet1
+  PublicSubnetIds:
+    Value: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2]]
     Export:
-      Name: !Sub ${EnvironmentName}-PublicSubnet1Id
+      Name: !Sub ${ServicePrefix}-PublicSubnetIds
 
-  PublicSubnet2Id:
-    Description: Public Subnet 2 ID (AZ2)
-    Value: !Ref PublicSubnet2
+  PrivateSubnetIds:
+    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
     Export:
-      Name: !Sub ${EnvironmentName}-PublicSubnet2Id
-
-  PrivateSubnet1Id:
-    Description: Private Subnet 1 ID (AZ1)
-    Value: !Ref PrivateSubnet1
-    Export:
-      Name: !Sub ${EnvironmentName}-PrivateSubnet1Id
-
-  PrivateSubnet2Id:
-    Description: Private Subnet 2 ID (AZ2)
-    Value: !Ref PrivateSubnet2
-    Export:
-      Name: !Sub ${EnvironmentName}-PrivateSubnet2Id
+      Name: !Sub ${ServicePrefix}-PrivateSubnetIds
 
   ALBSecurityGroupId:
     Description: Security Group ID for the ALB tier
     Value: !Ref ALBSecurityGroup
     Export:
-      Name: !Sub ${EnvironmentName}-ALBSecurityGroupId
+      Name: !Sub ${ServicePrefix}-ALBSecurityGroupId
 
   ECSSecurityGroupId:
     Description: Security Group ID for the App tier
-    Value: !Ref AppSecurityGroup
+    Value: !Ref ECSSecurityGroup
     Export:
-      Name: !Sub ${EnvironmentName}-AppSecurityGroupId
+      Name: !Sub ${ServicePrefix}-AppSecurityGroupId
 
   RDSSecurityGroupId:
     Description: Security Group ID for the DB tier
-    Value: !Ref DBSecurityGroup
+    Value: !Ref RDSSecurityGroup
     Export:
-      Name: !Sub ${EnvironmentName}-DBSecurityGroupId
+      Name: !Sub ${ServicePrefix}-DBSecurityGroupId
 
   NatGatewayId:
     Description: NAT Gateway ID
     Value: !Ref NatGateway
     Export:
-      Name: !Sub ${EnvironmentName}-NatGatewayId
+      Name: !Sub ${ServicePrefix}-NatGatewayId
   
   

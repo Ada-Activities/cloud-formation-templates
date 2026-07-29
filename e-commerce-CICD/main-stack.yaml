@@ -9,8 +9,12 @@ Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
 
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: Subnet Ids for your Public Subnets (Used to create DB Subnet Group)
+
   PrivateSubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+    Type: CommaDelimitedList
     Description: Subnet Ids for your Private Subnets (Used to create DB Subnet Group)
 
   OrdersImage:
@@ -22,6 +26,22 @@ Parameters:
   ProductsImage:
     Type: String
     Description: Full ECR image URI:tag for the Products service
+
+  RDSSecurityGroupId:
+    Type: String
+    Description: Security Group for RDS Dbs
+  
+  ALBSecurityGroupId:
+    Type: String
+    Description: Security Group for RDS Dbs
+  
+  ECSSecurityGroupId:
+    Type: String
+    Description: Security Group for RDS Dbs
+
+  ContainerPort:
+    Type: Number
+    Default: 5000
 
   ContainerPort:
     Type: Number
@@ -67,7 +87,7 @@ Resources:
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Sub '{{resolve:secretsmanager:${OrdersDBSecret}:SecretString:password}}'
       DBName: orders
-      PubliclyAccesible: false
+      PubliclyAccessible: false
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups: [!Ref RDSSecurityGroupId]
       BackupRetentionPeriod: 0
@@ -92,34 +112,40 @@ Resources:
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Sub '{{resolve:secretsmanager:${UsersDBSecret}:SecretString:password}}'
       DBName: users
-      PubliclyAccesible: false
+      PubliclyAccessible: false
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups: [!Ref RDSSecurityGroupId]
       BackupRetentionPeriod: 0
 
-  ProductsTable:
+  ProductsDBInstance:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: '${AWS::StackName}-products'
+      TableName: !Sub '${AWS::StackName}-products'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: product_key
-          AttributeType: s
+          AttributeType: S
       KeySchema:
         - AttributeName: product_key
-          KeyType: Hash
+          KeyType: HASH
 
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub '${AWS::StackName}-cluster'
 
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/main/${AWS::StackName}'
+      RetentionInDays: 3
+
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: !Sub '${AWS::StackName}-alb'
       Subnets: !Ref PrivateSubnetIds
-      SecurityGroups: [!Ref ALBSecurityGroup]
+      SecurityGroups: [!Ref ALBSecurityGroupId]
       Scheme: internal
       Type: application
   
@@ -146,7 +172,7 @@ Resources:
       HealthCheckPath: /
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      HealthChecktimeoutSeconds: 5
+      HealthCheckTimeoutSeconds: 5
       HealthCheckIntervalSeconds: 30
 
   UsersTargetGroup:
@@ -159,7 +185,7 @@ Resources:
       HealthCheckPath: /
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      HealthChecktimeoutSeconds: 5
+      HealthCheckTimeoutSeconds: 5
       HealthCheckIntervalSeconds: 30
   
   ProductsTargetGroup:
@@ -172,42 +198,42 @@ Resources:
       HealthCheckPath: /
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      HealthChecktimeoutSeconds: 5
+      HealthCheckTimeoutSeconds: 5
       HealthCheckIntervalSeconds: 30
   
   OrdersListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
-      ListenerArn: !ref ALBListener
+      ListenerArn: !Ref ALBListener
       Priority: 10
       Conditions:
         - Field: path-pattern
           Values: ['/orders*']
-      Action:
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref OrdersTargetGroup
   
   UsersListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
-      ListenerArn: !ref ALBListener
+      ListenerArn: !Ref ALBListener
       Priority: 20
       Conditions:
         - Field: path-pattern
           Values: ['/users*']
-      Action:
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref UsersTargetGroup
   
   ProductsListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
-      ListenerArn: !ref ALBListener
-      Priority: 20
+      ListenerArn: !Ref ALBListener
+      Priority: 30
       Conditions:
         - Field: path-pattern
           Values: ['/products*']
-      Action:
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref ProductsTargetGroup
 
@@ -220,8 +246,8 @@ Resources:
           - Effect: Allow
             Principal: { Service: ecs-tasks.amazonaws.com }
             Action: sts:AssumeRole
-        ManagedPolicyArns:
-          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
   
   ECSTaskRole:
     Type: AWS::IAM::Role
@@ -232,35 +258,35 @@ Resources:
           - Effect: Allow
             Principal: { Service: ecs-tasks.amazonaws.com }
             Action: sts:AssumeRole
-        Policies:
-          - PolicyName: ReadOrdersDBSecret
-            PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                - Effect: Allow
-                  Action: secretsmanager:GetSecretValue
-                  Resource: [ !Ref OrdersDBSecret, !Ref UsersDBSecret ]
-          -PolicyName: DynamoDBAccess
-            PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                - Effect: Allow
-              Action:
-                - dynamodb:GetItem
-                - dynamodb:PutItem
-                - dynamodb:UpdateItem
-                - dynamodb:DeleteItem
-                - dynamodb:Query
-                - dynamodb:Scan
-              Resource: !GetAtt ProductsTable.Arn
-          - PolicyName: ReadImagesBucket
-            PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                - Effect: Allow
-                  Action:
-                    - s3:GetObject
-                  Resource: !Sub '${ImagesBucket.Arn}/*'
+      Policies:
+        - PolicyName: ReadOrdersDBSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [ !Ref OrdersDBSecret, !Ref UsersDBSecret ]
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ProductsDBInstance.Arn
+        - PolicyName: ReadImagesBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${ImagesBucket.Arn}/*'
 
 
   OrdersTaskDef:
@@ -274,7 +300,7 @@ Resources:
         CpuArchitecture: ARM64
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
-      ExecutionRoleArn: !ref ECSTaskExecutionRole 
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole 
       TaskRoleArn: !Ref ECSTaskRole
       ContainerDefinitions:
         - Name: orders
@@ -302,15 +328,15 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn: OrdersListenerRule
     Properties:
-      Cluseter: !ref ECSCluster
-      TaskDefinitieon: !ref OrdersTaskDef
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref OrdersTaskDef
       DesiredCount: 2
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
           Subnets: !Ref PrivateSubnetIds
-          SecurityGroups: [!Ref ECSSecurityGroup]
+          SecurityGroups: [!Ref ECSSecurityGroupId]
       LoadBalancers:
         - ContainerName: orders
           ContainerPort: !Ref ContainerPort
@@ -327,7 +353,7 @@ Resources:
         CpuArchitecture: ARM64
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
-      ExecutionRoleArn: !ref ECSTaskExecutionRole 
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole 
       TaskRoleArn: !Ref ECSTaskRole
       ContainerDefinitions:
         - Name: users
@@ -355,15 +381,15 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn: UsersListenerRule
     Properties:
-      Cluseter: !ref ECSCluster
-      TaskDefinitieon: !ref UsersTaskDef
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref UsersTaskDef
       DesiredCount: 2
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
           Subnets: !Ref PrivateSubnetIds
-          SecurityGroups: [!Ref ECSSecurityGroup]
+          SecurityGroups: [!Ref ECSSecurityGroupId]
       LoadBalancers:
         - ContainerName: users
           ContainerPort: !Ref ContainerPort
@@ -380,23 +406,21 @@ Resources:
         CpuArchitecture: ARM64
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
-      ExecutionRoleArn: !ref ECSTaskExecutionRole 
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole 
       TaskRoleArn: !Ref ECSTaskRole
       ContainerDefinitions:
         - Name: products
           Image: !Ref ProductsImage
           PortMappings: [{ ContainerPort: !Ref ContainerPort }]
           Environment:
-            - Name: DATABASE_HOST
-              Value: !GetAtt ProductsDBInstance.Endpoint.Address
-            - Name: DATABASE_PORT
-              Value: !GetAtt ProductsDBInstance.Endpoint.Port
-            - Name: DATABASE_NAME
-              Value: products
-            - Name: DATABASE_USER
-              Value: !Ref DBUsername
-            - Name: DATABASE_SECRET_ARN
-              Value: !Ref ProductsDBSecret
+            - Name: TABLE_NAME
+              Value: !Ref ProductsDBInstance
+            - Name: KEY_NAME
+              Value: ProductId
+            - Name: BUCKET_NAME
+              Value: !Ref ImagesBucket
+            - Name: QUEUE_URL
+              Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
           LogConfiguration:
             LogDriver: awslogs
             Options: 
@@ -408,15 +432,15 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn: ProductsListenerRule
     Properties:
-      Cluseter: !ref ECSCluster
-      TaskDefinitieon: !ref ProductsTaskDef
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ProductsTaskDef
       DesiredCount: 2
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
           Subnets: !Ref PrivateSubnetIds
-          SecurityGroups: [!Ref ECSSecurityGroup]
+          SecurityGroups: [!Ref ECSSecurityGroupId]
       LoadBalancers:
         - ContainerName: products
           ContainerPort: !Ref ContainerPort
@@ -507,11 +531,11 @@ Resources:
         - IpProtocol: tcp
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
-          DestinationSecurityGroupId: ALBSecurityGroupId
+          DestinationSecurityGroupId: !Ref ALBSecurityGroupId
           Description: Allow outbound traffic to ALB
       Tags:
         - Key: Name
-          Value:: !sub '${${AWS::StackName}-vpclink-sg}'
+          Value: !Sub '${AWS::StackName}-vpclink-sg'
   
   AlbIngressFromVpcLink:
     Type: AWS::EC2::SecurityGroupIngress
@@ -534,7 +558,7 @@ Resources:
   HttpApiGateway:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Ref ApiName
+      Name: !Sub '${AWS::StackName}-api'
       ProtocolType: HTTP
       Description: HTTP API sending traffic to Orders, Users and Products via ALB
 
@@ -546,7 +570,7 @@ Resources:
       IntegrationMethod: ANY
       ConnectionType: VPC_LINK
       ConnectionId: !Ref HttpApiVpcLink
-      IntegrationUri: !Ref AlbListener
+      IntegrationUri: !Ref ALBListener
       PayloadFormatVersion: '1.0'
       TimeoutInMillis: 29000
 
@@ -578,6 +602,4 @@ Resources:
       StageName: !Ref StageName
       AutoDeploy: true
 
-Outputs:
 
-  
