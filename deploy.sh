@@ -15,6 +15,7 @@ source "$CONFIG_FILE"
 ECR_TEMPLATE="${STACK_PREFIX}/bootstrap-ecr.yaml"
 CODEBUILD_TEMPLATE="${STACK_PREFIX}/codebuild-projs.yaml"
 MAIN_TEMPLATE="${STACK_PREFIX}/main-stack.yaml"
+NETWORK_TEMPLATE="${STACK_PREFIX}/networking.yaml"
 FRONTEND_TEMPLATE="${STACK_PREFIX}/frontend-codebuild.yaml"
 
 require_file() {
@@ -23,20 +24,63 @@ require_file() {
     exit 1
   fi
 }
-require_file "$MAIN_TEMPLATE"
-[ "${RUN_ECR_BOOTSTRAP:-false}" = "true" ] && require_file "$ECR_TEMPLATE"
-[ "${RUN_CODEBUILD:-false}" = "true" ] && require_file "$CODEBUILD_TEMPLATE"
-[ "${RUN_FRONTEND:-false}" = "true" ] && require_file "$FRONTEND_TEMPLATE"
+
+# --- Helper: build + push a single image to its ECR repo ---
+push_initial_image() {
+  local repo_uri="$1"        # full URI, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp-orders
+  local dockerfile_path="$2"
+  local image_tag="${3:-initial}"
+
+  local registry="${repo_uri%%/*}"
+  local region
+  region=$(echo "$registry" | cut -d. -f4)
+
+  echo "Authenticating Docker with ECR (${region})..."
+  aws ecr get-login-password --region "$region" \
+    | docker login --username AWS --password-stdin "$registry"
+
+  echo "Building image for ${repo_uri}..."
+  docker build --platform linux/amd64 -t "${repo_uri}:${image_tag}" "$dockerfile_path"
+
+  echo "Pushing ${repo_uri}:${image_tag}..."
+  docker push "${repo_uri}:${image_tag}"
+}
 
 out() { # out <stack-name> <output-key>
   aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" \
     --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text
 }
 
+# Main stack is always required. All other stages only matter if they are set to true in the config file.
+require_file "$MAIN_TEMPLATE"
+[ "${RUN_NETWORK:-false}" = "true" ] && require_file "$NETWORK_TEMPLATE"
+[ "${RUN_ECR_BOOTSTRAP:-false}" = "true" ] && require_file "$ECR_TEMPLATE"
+[ "${RUN_CODEBUILD:-false}" = "true" ] && require_file "$CODEBUILD_TEMPLATE"
+[ "${RUN_FRONTEND:-false}" = "true" ] && require_file "$FRONTEND_TEMPLATE"
+
 if [ "${RUN_CODEBUILD:-false}" = "true" ]; then
   read -rsp "Enter your GitHub personal access token: " GITHUB_TOKEN
   echo
 fi
+
+if [ "${RUN_NETWORKING:-false}" = "true" ]; then
+  echo "== Deploying Networking (${STACK_PREFIX}) =="
+  aws cloudformation deploy --region "$REGION" \
+    --stack-name "${STACK_PREFIX}-network" \
+    --template-file "$NETWORK_TEMPLATE" \
+    --parameter-overrides ServicePrefix="$STACK_PREFIX"
+fi
+
+VPC_ID=$(out "${STACK_PREFIX}-network" VPCId 2>/dev/null || echo "")
+PUBLIC_SUBNET_1_ID=$(out "${STACK_PREFIX}-network" PublicSubnet1Id 2>/dev/null || echo "")
+PUBLIC_SUBNET_2_ID=$(out "${STACK_PREFIX}-network" PublicSubnet2Id 2>/dev/null || echo "")
+PRIVATE_SUBNET_1_ID=$(out "${STACK_PREFIX}-network" PrivateSubnet1Id 2>/dev/null || echo "")
+PRIVATE_SUBNET_2_ID=$(out "${STACK_PREFIX}-network" PrivateSubnet1Id 2>/dev/null || echo "")
+ALB_SECURITY_GROUP_ID=$(out "${STACK_PREFIX}-network" ALBSecurityGroupId 2>/dev/null || echo "")
+ECS_SECURITY_GROUP_ID=$(out "${STACK_PREFIX}-network" ECSSecurityGroupId 2>/dev/null || echo "")
+RDS_SECURITY_GROUP_ID=$(out "${STACK_PREFIX}-network" RDSSecurityGroupId 2>/dev/null || echo "")
+
+
 
 if [ "${RUN_ECR_BOOTSTRAP:-false}" = "true" ]; then
   echo "== Deploying ECR bootstrap (${STACK_PREFIX}) =="
@@ -49,6 +93,22 @@ fi
 ORDERS_REPO=$(out "${STACK_PREFIX}-ecr" OrdersRepoUri 2>/dev/null || echo "")
 USERS_REPO=$(out "${STACK_PREFIX}-ecr" UsersRepoUri 2>/dev/null || echo "")
 PRODUCTS_REPO=$(out "${STACK_PREFIX}-ecr" ProductsRepoUri 2>/dev/null || echo "")
+
+if [[ "${PUSH_INITIAL_IMAGES:-false}" == "true" ]]; then
+  for entry in "${INITIAL_IMAGE_SERVICES[@]}"; do
+    service_name="${entry%%:*}"
+    dockerfile_path="${entry#*:}"
+    repo_name="${STACK_PREFIX}-${service_name}"
+
+    IMAGE_COUNT=$(aws ecr list-images --repository-name "$repo_name" --query 'length(imageIds)' --output text 2>/dev/null || echo "0")
+
+    if [[ "$IMAGE_COUNT" == "0" ]]; then
+      push_initial_image "$repo_name" "$dockerfile_path" "initial"
+    else
+      echo "Skipping ${repo_name} — image already exists."
+    fi
+  done
+fi
 
 if [ "${RUN_CODEBUILD:-false}" = "true" ]; then
   echo "== Registering GitHub source credentials (safe to re-run) =="
@@ -75,6 +135,37 @@ if [ "${RUN_CODEBUILD:-false}" = "true" ]; then
 
   echo "== Triggering backend builds =="
   ./trigger-builds.sh "$ORDERS_PROJECT" "$USERS_PROJECT" "$PRODUCTS_PROJECT"
+fi
+
+# --- Loop through configured services and bootstrap-push if the repo is empty ---
+if [[ "${PUSH_INITIAL_IMAGES:-false}" == "true" ]]; then
+  for entry in "${INITIAL_IMAGE_SERVICES[@]}"; do
+    service_name="${entry%%:*}"
+    dockerfile_path="${entry#*:}"
+
+    if [[ ! -f "${dockerfile_path}/Dockerfile" ]]; then
+      echo "ERROR: No Dockerfile found at ${dockerfile_path} — check INITIAL_IMAGE_SERVICES for ${service_name}"
+      exit 1
+    fi
+
+    var_name="$(echo "$service_name" | tr '[:lower:]' '[:upper:]')_REPO"
+    repo_uri="${!var_name}"
+
+    if [[ -z "$repo_uri" ]]; then
+      echo "Skipping ${service_name} — ${var_name} is empty (ECR stack may not exist yet)"
+      continue
+    fi
+
+    repo_name="${repo_uri##*/}"
+
+    IMAGE_COUNT=$(aws ecr list-images --repository-name "$repo_name" --query 'length(imageIds)' --output text 2>/dev/null || echo "0")
+
+    if [[ "$IMAGE_COUNT" == "0" ]]; then
+      push_initial_image "$repo_uri" "$dockerfile_path" "initial"
+    else
+      echo "Skipping ${repo_name} — image already exists."
+    fi
+  done
 fi
 
 echo "== Deploying main stack: ${TEMPLATE_FILE} (${STACK_PREFIX}-main) =="
