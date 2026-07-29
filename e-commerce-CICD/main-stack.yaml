@@ -70,7 +70,7 @@ Resources:
   OrdersDBSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub '${AWS::StackName}-orders-db-secret'
+      Name: !Sub '${ServicePrefix}-orders-db-secret'
       GenerateSecretString:
         SecretStringTemplate: !Sub '{"username":"${DBUsername}"}'
         GenerateStringKey: password
@@ -95,7 +95,7 @@ Resources:
   UsersDBSecret:
       Type: AWS::SecretsManager::Secret
       Properties:
-        Name: !Sub '${AWS::StackName}-users-db-secret'
+        Name: !Sub '${ServicePrefix}-users-db-secret'
         GenerateSecretString:
           SecretStringTemplate: !Sub '{"username":"${DBUsername}"}'
           GenerateStringKey: password
@@ -120,7 +120,7 @@ Resources:
   ProductsDBInstance:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub '${AWS::StackName}-products'
+      TableName: !Sub '${ServicePrefix}-products'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: product_key
@@ -132,18 +132,18 @@ Resources:
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub '${AWS::StackName}-cluster'
+      ClusterName: !Sub '${ServicePrefix}-cluster'
 
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub '/main/${AWS::StackName}'
+      LogGroupName: !Sub '/main/${ServicePrefix}'
       RetentionInDays: 3
 
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Sub '${AWS::StackName}-alb'
+      Name: !Sub '${ServicePrefix}-alb'
       Subnets: !Ref PrivateSubnetIds
       SecurityGroups: [!Ref ALBSecurityGroupId]
       Scheme: internal
@@ -292,7 +292,7 @@ Resources:
   OrdersTaskDef:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${AWS::StackName}-orders'
+      Family: !Sub '${ServicePrefix}-orders'
       Cpu: '256'
       Memory: '512'
       RuntimePlatform:
@@ -345,7 +345,7 @@ Resources:
   UsersTaskDef:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${AWS::StackName}-users'
+      Family: !Sub '${ServicePrefix}-users'
       Cpu: '256'
       Memory: '512'
       RuntimePlatform:
@@ -398,7 +398,7 @@ Resources:
   ProductsTaskDef:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${AWS::StackName}-products'
+      Family: !Sub '${ServicePrefix}-products'
       Cpu: '256'
       Memory: '512'
       RuntimePlatform:
@@ -480,7 +480,7 @@ Resources:
   PresignedUrlFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-presign'
+      FunctionName: !Sub '${ServicePrefix}-presign'
       Runtime: nodejs20.x
       Handler: index.handler
       Role: !GetAtt PresignedUrlFunctionRole.Arn
@@ -508,7 +508,7 @@ Resources:
   HttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Sub '${AWS::StackName}-api'
+      Name: !Sub '${ServicePrefix}-api'
       ProtocolType: HTTP
       Target: !GetAtt PresignedUrlFunction.Arn
 
@@ -535,7 +535,7 @@ Resources:
           Description: Allow outbound traffic to ALB
       Tags:
         - Key: Name
-          Value: !Sub '${AWS::StackName}-vpclink-sg'
+          Value: !Sub '${ServicePrefix}-vpclink-sg'
   
   AlbIngressFromVpcLink:
     Type: AWS::EC2::SecurityGroupIngress
@@ -550,7 +550,7 @@ Resources:
   HttpApiVpcLink:
     Type: AWS::ApiGatewayV2::VpcLink
     Properties: 
-      Name: !Sub '${AWS::StackName}-vpclink'
+      Name: !Sub '${ServicePrefix}-vpclink'
       SubnetIds: !Ref PrivateSubnetIds
       SecurityGroupIds:
         - !Ref VpcLinkSecurityGroup
@@ -558,7 +558,7 @@ Resources:
   HttpApiGateway:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Sub '${AWS::StackName}-api'
+      Name: !Sub '${ServicePrefix}-api'
       ProtocolType: HTTP
       Description: HTTP API sending traffic to Orders, Users and Products via ALB
 
