@@ -43,9 +43,9 @@ Parameters:
     Type: Number
     Default: 5000
 
-  ContainerPort:
+  ALBPort:
     Type: Number
-    Default: 5000
+    Default: 80
 
   DBUsername:
     Type: String
@@ -529,8 +529,8 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
+          FromPort: !Ref ALBPort
+          ToPort: !Ref ALBPort
           DestinationSecurityGroupId: !Ref ALBSecurityGroupId
           Description: Allow outbound traffic to ALB
       Tags:
@@ -542,8 +542,8 @@ Resources:
     Properties:
       GroupId: !Ref ALBSecurityGroupId
       IpProtocol: tcp
-      FromPort: !Ref ContainerPort
-      ToPort: !Ref ContainerPort
+      FromPort: !Ref ALBPort
+      ToPort: !Ref ALBPort
       SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
       Description: Allow inbound to ALB from API Gateway VPC Link
 
