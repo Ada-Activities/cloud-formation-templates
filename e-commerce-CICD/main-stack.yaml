@@ -264,7 +264,7 @@ Resources:
       TaskRoleArn: !Ref ECSTaskRole
       ContainerDefinitions:
         - Name: users
-          Image: !Ref OrdersImage
+          Image: !Ref UsersImage
           PortMappings: [{ ContainerPort: !Ref ContainerPort }]
           Environment:
             - Name: DATABASE_HOST
