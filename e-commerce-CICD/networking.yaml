@@ -72,7 +72,7 @@ Resources:
       CidrBlock: !Ref PublicSubnet1CIDR
       MapPublicIpOnLaunch: true
       Tags:
-        - Key: name
+        - Key: Name
           Value: !Sub '${ServicePrefix}-public-subnet-1'
 
   PublicSubnet2:
@@ -83,7 +83,7 @@ Resources:
       CidrBlock: !Ref PublicSubnet2CIDR
       MapPublicIpOnLaunch: true
       Tags:
-        - Key: name
+        - Key: Name
           Value: !Sub '${ServicePrefix}-public-subnet-2'
 
   PrivateSubnet1:
@@ -94,7 +94,7 @@ Resources:
       CidrBlock: !Ref PrivateSubnet1CIDR
       MapPublicIpOnLaunch: false
       Tags:
-        - Key: name
+        - Key: Name
           Value: !Sub '${ServicePrefix}-private-subnet-1'
 
   PrivateSubnet2:
@@ -105,7 +105,7 @@ Resources:
       CidrBlock: !Ref PrivateSubnet2CIDR
       MapPublicIpOnLaunch: false
       Tags:
-        - Key: name
+        - Key: Name
           Value: !Sub '${ServicePrefix}-private-subnet-2'
 
   NatGatewayEIP:
