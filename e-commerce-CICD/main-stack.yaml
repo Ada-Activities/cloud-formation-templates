@@ -51,6 +51,10 @@ Parameters:
     Type: String
     Default: dbadmin
 
+  ServicePrefix:
+    Type: String
+    Default: demo
+  
   StageName:
     Type: String
     Default: $default
