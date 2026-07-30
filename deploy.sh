@@ -157,7 +157,7 @@ if [[ "${PUSH_INITIAL_IMAGES:-false}" == "true" ]]; then
       continue
     fi
 
-    repo_name="${repo_uri##*/}"   # bare name, e.g. e-commerce-cicd-orders — only needed for list-images
+    repo_name="${repo_uri#*/}"   # bare name, e.g. e-commerce-cicd-orders — only needed for list-images
 
     IMAGE_COUNT=$(aws ecr list-images --repository-name "$repo_name" --query 'length(imageIds)' --output text 2>/dev/null || echo "0")
 
