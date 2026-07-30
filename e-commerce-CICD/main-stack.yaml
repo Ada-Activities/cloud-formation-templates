@@ -65,11 +65,24 @@ Parameters:
 
 Resources:
 
+  ### --- DB Subnet Group ---
+
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: Subnets for demo RDS instances
+      DBSubnetGroupName: !Sub '${ServicePrefix}-db-subnet-group'
       SubnetIds: !Ref PrivateSubnetIds
+
+  ### --- Log Group for Debugging ---
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/main/${ServicePrefix}'
+      RetentionInDays: 3
+
+  ### --- Orders DB - RDS with AWS managed Secret ---
 
   OrdersDBSecret:
     Type: AWS::SecretsManager::Secret
@@ -91,10 +104,13 @@ Resources:
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Sub '{{resolve:secretsmanager:${OrdersDBSecret}:SecretString:password}}'
       DBName: orders
+      DBInstanceIdentifier: !Sub '${ServicePrefix}-orders-db'
       PubliclyAccessible: false
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups: [!Ref RDSSecurityGroupId]
       BackupRetentionPeriod: 0
+
+  ### --- Users DB - RDS with AWS managed Secret ---
 
   UsersDBSecret:
       Type: AWS::SecretsManager::Secret
@@ -120,6 +136,8 @@ Resources:
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups: [!Ref RDSSecurityGroupId]
       BackupRetentionPeriod: 0
+  
+  ### --- Products DB - DynamoDB with partition key ---
 
   ProductsDBInstance:
     Type: AWS::DynamoDB::Table
@@ -133,117 +151,18 @@ Resources:
         - AttributeName: product_key
           KeyType: HASH
 
+  ### --- ECS Cluster ---
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Sub '${ServicePrefix}-cluster'
 
-  LogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub '/main/${ServicePrefix}'
-      RetentionInDays: 3
-
-  ALB:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Name: !Sub '${ServicePrefix}-alb'
-      Subnets: !Ref PrivateSubnetIds
-      SecurityGroups: [!Ref ALBSecurityGroupId]
-      Scheme: internal
-      Type: application
-  
-  ALBListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref ALB
-      Port: 80
-      Protocol: HTTP
-      DefaultActions:
-        - Type: fixed-response
-          FixedResponseConfig:
-            StatusCode: '404'
-            ContentType: application/json
-            MessageBody: '{"error": "Not Found"}'
-  
-  OrdersTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      VpcId: !Ref VpcId
-      Port: !Ref ContainerPort
-      Protocol: HTTP
-      TargetType: ip
-      HealthCheckPath: /
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      HealthCheckTimeoutSeconds: 5
-      HealthCheckIntervalSeconds: 30
-
-  UsersTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      VpcId: !Ref VpcId
-      Port: !Ref ContainerPort
-      Protocol: HTTP
-      TargetType: ip
-      HealthCheckPath: /
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      HealthCheckTimeoutSeconds: 5
-      HealthCheckIntervalSeconds: 30
-  
-  ProductsTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      VpcId: !Ref VpcId
-      Port: !Ref ContainerPort
-      Protocol: HTTP
-      TargetType: ip
-      HealthCheckPath: /
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      HealthCheckTimeoutSeconds: 5
-      HealthCheckIntervalSeconds: 30
-  
-  OrdersListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref ALBListener
-      Priority: 10
-      Conditions:
-        - Field: path-pattern
-          Values: ['/orders*']
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref OrdersTargetGroup
-  
-  UsersListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref ALBListener
-      Priority: 20
-      Conditions:
-        - Field: path-pattern
-          Values: ['/users*']
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref UsersTargetGroup
-  
-  ProductsListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref ALBListener
-      Priority: 30
-      Conditions:
-        - Field: path-pattern
-          Values: ['/products*']
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref ProductsTargetGroup
+  ### --- IAM roles for task definitions and services (Future Fix: Best practice separates IAM Roles out for each microservice ) ---
 
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub '${ServicePrefix}-task-execution-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -256,6 +175,7 @@ Resources:
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub '${ServicePrefix}-task-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -292,6 +212,7 @@ Resources:
                   - s3:GetObject
                 Resource: !Sub '${ImagesBucket.Arn}/*'
 
+  ### --- Orders, users, producst task Definitions
 
   OrdersTaskDef:
     Type: AWS::ECS::TaskDefinition
@@ -328,24 +249,6 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: orders
   
-  OrdersService:
-    Type: AWS::ECS::Service
-    DependsOn: OrdersListenerRule
-    Properties:
-      Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref OrdersTaskDef
-      DesiredCount: 2
-      LaunchType: FARGATE
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
-          Subnets: !Ref PrivateSubnetIds
-          SecurityGroups: [!Ref ECSSecurityGroupId]
-      LoadBalancers:
-        - ContainerName: orders
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref OrdersTargetGroup
-
   UsersTaskDef:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -380,24 +283,6 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: users
-  
-  UsersService:
-    Type: AWS::ECS::Service
-    DependsOn: UsersListenerRule
-    Properties:
-      Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref UsersTaskDef
-      DesiredCount: 2
-      LaunchType: FARGATE
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
-          Subnets: !Ref PrivateSubnetIds
-          SecurityGroups: [!Ref ECSSecurityGroupId]
-      LoadBalancers:
-        - ContainerName: users
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref UsersTargetGroup
 
   ProductsTaskDef:
     Type: AWS::ECS::TaskDefinition
@@ -431,11 +316,160 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: products
+
+  ### --- Target Groups For Orders, Users and Products
+
+  OrdersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServicePrefix}-orders-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+
+  UsersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServicePrefix}-users-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+  
+  ProductsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServicePrefix}-products-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+
+  ### --- Application Load Balancer with Listener and Rules
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ServicePrefix}-alb'
+      Subnets: !Ref PrivateSubnetIds
+      SecurityGroups: [!Ref ALBSecurityGroupId]
+      Scheme: internal
+      Type: application
+  
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '404'
+            ContentType: application/json
+            MessageBody: '{"error": "Not Found"}'
+  
+  OrdersListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/orders*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OrdersTargetGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${ServicePrefix}-orders-rule 
+
+  
+  UsersListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ['/users*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref UsersTargetGroup
+  
+  ProductsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values: ['/products*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ProductsTargetGroup
+
+  ### --- Orders, Users and Products Services
+  
+  OrdersService:
+    Type: AWS::ECS::Service
+    DependsOn: OrdersListenerRule
+    Properties:
+      ServiceName: !Sub ${ServicePrefix}-orders-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref OrdersTaskDef
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref ECSSecurityGroupId]
+      LoadBalancers:
+        - ContainerName: orders
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref OrdersTargetGroup
+  
+  UsersService:
+    Type: AWS::ECS::Service
+    DependsOn: UsersListenerRule
+    Properties:
+      ServiceName: !Sub ${ServicePrefix}-users-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref UsersTaskDef
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref ECSSecurityGroupId]
+      LoadBalancers:
+        - ContainerName: users
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref UsersTargetGroup
   
   ProductsService:
     Type: AWS::ECS::Service
     DependsOn: ProductsListenerRule
     Properties:
+      ServiceName: !Sub ${ServicePrefix}-products-service
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ProductsTaskDef
       DesiredCount: 2
@@ -554,7 +588,7 @@ Resources:
   HttpApiVpcLink:
     Type: AWS::ApiGatewayV2::VpcLink
     Properties: 
-      Name: !Sub '${ServicePrefix}-vpclink'
+      Name: !Sub '${ServicePrefix}-vpc-link'
       SubnetIds: !Ref PrivateSubnetIds
       SecurityGroupIds:
         - !Ref VpcLinkSecurityGroup
