@@ -7,11 +7,6 @@ CONFIG_FILE="${1:?Usage: $0 <config-file>}"
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 
-echo "DEBUG: CONFIG_FILE arg = $1"
-echo "DEBUG: sourcing from = ${CONFIG_FILE:-not set}"
-source "$1" || echo "ERROR: failed to source $1"
-echo "DEBUG: STACK_PREFIX after source = ${STACK_PREFIX}"
-
 : "${REGION:?Config must set REGION}"
 : "${STACK_PREFIX:?Config must set STACK_PREFIX}"
 
@@ -212,6 +207,7 @@ aws cloudformation deploy --region "$REGION" \
       OrdersImage="${ORDERS_REPO}:latest" \
       UsersImage="${USERS_REPO}:latest" \
       ProductsImage="${PRODUCTS_REPO}:latest" \
+      ServicePrefix="$STACK_PREFIX" \
       "${EXTRA_PARAM_OVERRIDES[@]}"
 
 if [ "${RUN_FRONTEND:-false}" = "true" ]; then
