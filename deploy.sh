@@ -202,7 +202,7 @@ echo "== Deploying main stack: ${MAIN_TEMPLATE} (${STACK_PREFIX}-main) =="
 aws cloudformation deploy --region "$REGION" \
   --stack-name "${STACK_PREFIX}-main" \
   --template-file "$MAIN_TEMPLATE" \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
       OrdersImage="${ORDERS_REPO}:latest" \
       UsersImage="${USERS_REPO}:latest" \
