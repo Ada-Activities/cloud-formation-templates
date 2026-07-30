@@ -412,6 +412,9 @@ Resources:
       Actions:
         - Type: forward
           TargetGroupArn: !Ref UsersTargetGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${ServicePrefix}-users-rule 
   
   ProductsListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
@@ -424,6 +427,9 @@ Resources:
       Actions:
         - Type: forward
           TargetGroupArn: !Ref ProductsTargetGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${ServicePrefix}-products-rule 
 
   ### --- Orders, Users and Products Services
   
@@ -558,7 +564,7 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
 
-  ### --- API Gateway with VPC Link --- 
+  ### --- API Gateway with VPC Link and routes to each microservice --- 
 
   VpcLinkSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -596,7 +602,7 @@ Resources:
   HttpApiGateway:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Sub '${ServicePrefix}-api'
+      Name: !Sub '${ServicePrefix}-api-gateway'
       ProtocolType: HTTP
       Description: HTTP API sending traffic to Orders, Users and Products via ALB
 

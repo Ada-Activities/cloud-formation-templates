@@ -12,19 +12,19 @@ Resources:
   OrdersRepo:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${ServicePrefix}-orders'
+      RepositoryName: !Sub '${ServicePrefix}/orders'
       EmptyOnDelete: true   # lets `aws cloudformation delete-stack` succeed even with images inside
 
   UsersRepo:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${ServicePrefix}-users'
+      RepositoryName: !Sub '${ServicePrefix}/users'
       EmptyOnDelete: true
 
   ProductsRepo:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${ServicePrefix}-products'
+      RepositoryName: !Sub '${ServicePrefix}/products'
       EmptyOnDelete: true
 
 Outputs:
