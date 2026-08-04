@@ -77,7 +77,7 @@ if [ "${RUN_CODEBUILD:-false}" = "true" ]; then
   ./trigger-builds.sh "$ORDERS_PROJECT" "$USERS_PROJECT" "$PRODUCTS_PROJECT"
 fi
 
-echo "== Deploying main stack: ${TEMPLATE_FILE} (${STACK_PREFIX}-main) =="
+echo "== Deploying main stack: ${MAIN_TEMPLATE} (${STACK_PREFIX}-main) =="
 aws cloudformation deploy --region "$REGION" \
   --stack-name "${STACK_PREFIX}-main" \
   --template-file "$MAIN_TEMPLATE" \
