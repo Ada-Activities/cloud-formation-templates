@@ -30,6 +30,7 @@ Each subdirectory in this repository contains the files needed to create one or 
    1. **NOTE** - If the particular stack uses Codebuild to grab repositories from github, you will be prompted to enter your GITHUB Personal Access Token for authentication purposes.
 3. Depending on what is being created, stacks can take anywhere from 5-30 minutes to run. You can keep track of the progress of particular stacks in the AWS Cloud Formation Console. Once a stack has been created, verify the appropriate resources have been created. You should now be able to run the livecode as expected.
 4. Once the livecode is finished, use `./teardown.sh <STACK_PREFIX>` or `./schedule-teardown.sh <STACK_PREFIX> <TIME IN MINUTES>` to teardown the stack you created in order to save on costs. The `<STACK_PREFIX>` will always be the name of your directory. Something  like `e-commerce-intro`. 
+   1. Note: Due to sporadic AWS irregularities, not all resources may be torn down. If this does happen, try running the teardown again to catch the final resources. If some resources still remain, the stack can be deleted manually in the AWS console.
    
 5. Verify the corresponding stack and resources have been removed.
 
