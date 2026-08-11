@@ -4,8 +4,9 @@ set -euo pipefail
 # Example: ./teardown.sh microservice-demo
 #          ./teardown.sh microservice-demo-networked us-west-2
 
-STACK_PREFIX="${1:?Usage: $0 <stack-prefix> [region]}"
-REGION="${2:-us-east-1}"
+STACK_PREFIX="${1:?Usage: $0 <stack-prefix> }"
+read -p "Enter region (e.g. us-east-1): " REGION
+REGION=${REGION:-us-east-1}
 
 echo "== Tearing down everything under prefix: ${STACK_PREFIX} (region: ${REGION}) =="
 
