@@ -29,7 +29,7 @@ Each subdirectory in this repository contains the files needed to create one or 
 2. Once the variables have been updated, run the command `./deploy.sh <SUBDIRECTORY_NAME>/config.conf`. This command should run all parts of stack creation. If anything fails, an error message will point you in the direction of the correct aws logs to use for debugging purposes.
    1. **NOTE** - If the particular stack uses Codebuild to grab repositories from github, you will be prompted to enter your GITHUB Personal Access Token for authentication purposes.
 3. Depending on what is being created, stacks can take anywhere from 5-30 minutes to run. You can keep track of the progress of particular stacks in the AWS Cloud Formation Console. Once a stack has been created, verify the appropriate resources have been created. You should now be able to run the livecode as expected.
-4. Once the livecode is finished, use `./teardown.sh <STACK_PREFIX>` or `./schedule-teardown.sh <STACK_PREFIX> <TIME IN MINUTES>` to teardown the stack you created in order to save on costs.
+4. Once the livecode is finished, use `./teardown.sh <STACK_PREFIX>` or `./schedule-teardown.sh <STACK_PREFIX> <TIME IN MINUTES>` to teardown the stack you created in order to save on costs. The `<STACK_PREFIX>` will always be the name of your directory. Something  like `e-commerce-intro`. 
    
 5. Verify the corresponding stack and resources have been removed.
 
