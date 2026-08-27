@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CodeBuild projects for Orders/Users/Products - build & push Docker images to ECR
+  straight from GitHub, no local Docker needed.
+  PREREQUISITE (one-time per account/region):
+    aws codebuild import-source-credentials --server-type GITHUB \
+      --auth-type PERSONAL_ACCESS_TOKEN --token <your-github-pat>
+
+Parameters:
+  OrdersRepoUrl:
+    Type: String
+    Description: e.g. https://github.com/your-org/orders-service
+  UsersRepoUrl:
+    Type: String
+  ProductsRepoUrl:
+    Type: String
+  GitHubBranch:
+    Type: String
+    Default: main
+  OrdersEcrRepoUri:
+    Type: String
+    Description: Output from bootstrap-ecr.yaml
+  UsersEcrRepoUri:
+    Type: String
+  ProductsEcrRepoUri:
+    Type: String
+  ImageTag:
+    Type: String
+    Default: latest
+
+Resources:
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BuildAndPush
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource: '*'
+
+  OrdersBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-orders-build'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: NO_ARTIFACTS }
+      Source:
+        Type: GITHUB
+        Location: !Ref OrdersRepoUrl
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${OrdersEcrRepoUri}
+            build:
+              commands:
+                - docker build -t ${OrdersEcrRepoUri}:${ImageTag} .
+            post_build:
+              commands:
+                - docker push ${OrdersEcrRepoUri}:${ImageTag}
+      SourceVersion: !Ref GitHubBranch
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - { Name: AWS_REGION, Value: !Ref AWS::Region }
+      TimeoutInMinutes: 20
+
+  UsersBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-users-build'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: NO_ARTIFACTS }
+      Source:
+        Type: GITHUB
+        Location: !Ref UsersRepoUrl
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${UsersEcrRepoUri}
+            build:
+              commands:
+                - docker build -t ${UsersEcrRepoUri}:${ImageTag} .
+            post_build:
+              commands:
+                - docker push ${UsersEcrRepoUri}:${ImageTag}
+      SourceVersion: !Ref GitHubBranch
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - { Name: AWS_REGION, Value: !Ref AWS::Region }
+      TimeoutInMinutes: 20
+
+  ProductsBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-products-build'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: NO_ARTIFACTS }
+      Source:
+        Type: GITHUB
+        Location: !Ref ProductsRepoUrl
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${ProductsEcrRepoUri}
+            build:
+              commands:
+                - docker build -t ${ProductsEcrRepoUri}:${ImageTag} .
+            post_build:
+              commands:
+                - docker push ${ProductsEcrRepoUri}:${ImageTag}
+      SourceVersion: !Ref GitHubBranch
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - { Name: AWS_REGION, Value: !Ref AWS::Region }
+      TimeoutInMinutes: 20
+
+Outputs:
+  OrdersProjectName:
+    Value: !Ref OrdersBuildProject
+  UsersProjectName:
+    Value: !Ref UsersBuildProject
+  ProductsProjectName:
+    Value: !Ref ProductsBuildProject
