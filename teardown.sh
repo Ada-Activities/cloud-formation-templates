@@ -5,8 +5,11 @@ set -euo pipefail
 #          ./teardown.sh microservice-demo-networked us-west-2
 
 STACK_PREFIX="${1:?Usage: $0 <stack-prefix> }"
-read -p "Enter region (e.g. us-east-1): " REGION
-REGION=${REGION:-us-east-1}
+REGION=${2:-}
+if [[ -z "${REGION:-}" ]]; then
+  read -p "Enter region (e.g. us-east-1): " REGION
+  REGION=${REGION:-us-east-1}
+fi
 
 echo "== Tearing down everything under prefix: ${STACK_PREFIX} (region: ${REGION}) =="
 
