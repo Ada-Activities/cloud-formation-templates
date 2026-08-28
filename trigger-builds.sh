@@ -2,7 +2,11 @@
 set -euo pipefail
 # Usage: ./trigger-builds.sh <orders-project> <users-project> <products-project>
 
-REGION="us-east-1"
+if [[ -z "${REGION:-}" ]]; then
+  read -p "Enter region (e.g. us-east-1): " REGION
+  REGION=${REGION:-us-east-1}
+fi
+
 PROJECTS=("$@")
 
 if [ "${#PROJECTS[@]}" -lt 1 ]; then

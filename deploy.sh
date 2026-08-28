@@ -193,10 +193,8 @@ if [ "${RUN_CODEBUILD:-false}" = "true" ]; then
   PRODUCTS_PROJECT=$(out "${STACK_PREFIX}-codebuild" ProductsProjectName)
 
   echo "== Triggering backend builds =="
-  ./trigger-builds.sh "$ORDERS_PROJECT" "$USERS_PROJECT" "$PRODUCTS_PROJECT"
+  REGION="$REGION" ./trigger-builds.sh "$ORDERS_PROJECT" "$USERS_PROJECT" "$PRODUCTS_PROJECT"
 fi
-
-#
 
 echo "== Deploying main stack: ${MAIN_TEMPLATE} (${STACK_PREFIX}-main) =="
 aws cloudformation deploy --region "$REGION" \
@@ -231,7 +229,7 @@ if [ "${RUN_FRONTEND:-false}" = "true" ]; then
         BuildOutputDir="$FRONTEND_BUILD_OUTPUT_DIR"
 
   FRONTEND_PROJECT=$(out "${STACK_PREFIX}-frontend-codebuild" FrontendProjectName)
-  ./trigger-builds.sh "$FRONTEND_PROJECT"
+  REGION="$REGION" ./trigger-builds.sh "$FRONTEND_PROJECT"
 fi
 
 echo "== Done: ${STACK_PREFIX} =="
