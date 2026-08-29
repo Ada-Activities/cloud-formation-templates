@@ -37,6 +37,10 @@ echo "== Deleting ECR bootstrap stack (images auto-emptied via EmptyOnDelete) ==
 aws cloudformation delete-stack --region "$REGION" --stack-name "${STACK_PREFIX}-ecr" 2>/dev/null || true
 aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "${STACK_PREFIX}-ecr" 2>/dev/null || true
 
+echo "== Deleting Network stack =="
+aws cloudformation delete-stack --region "$REGION" --stack-name "${STACK_PREFIX}-network" 2>/dev/null || true
+aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "${STACK_PREFIX}-network" 2>/dev/null || true
+
 echo "== Also checking for an auto-teardown schedule stack =="
 aws cloudformation delete-stack --region "$REGION" --stack-name "${STACK_PREFIX}-main-auto-teardown" 2>/dev/null || true
 

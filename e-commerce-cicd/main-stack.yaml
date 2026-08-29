@@ -1,0 +1,649 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Demo microservice stack: Orders/Users (ECS Fargate + RDS), Products (ECS Fargate + DynamoDB),
+  presigned-URL Lambda + API Gateway + S3, and Amplify-hosted React frontend.
+  NOT hardened for production - wide-open security group, public RDS, no deletion protection.
+
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: Subnet Ids for your Public Subnets (Used to create DB Subnet Group)
+
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: Subnet Ids for your Private Subnets (Used to create DB Subnet Group)
+
+  OrdersImage:
+    Type: String
+    Description: Full ECR image URI:tag for the Orders service
+  UsersImage:
+    Type: String
+    Description: Full ECR image URI:tag for the Users service
+  ProductsImage:
+    Type: String
+    Description: Full ECR image URI:tag for the Products service
+
+  RDSSecurityGroupId:
+    Type: String
+    Description: Security Group for RDS Dbs
+  
+  ALBSecurityGroupId:
+    Type: String
+    Description: Security Group for RDS Dbs
+  
+  ECSSecurityGroupId:
+    Type: String
+    Description: Security Group for RDS Dbs
+
+  ContainerPort:
+    Type: Number
+    Default: 5000
+
+  ALBPort:
+    Type: Number
+    Default: 80
+
+  DBUsername:
+    Type: String
+    Default: dbadmin
+
+  ServicePrefix:
+    Type: String
+    Default: demo
+  
+  StageName:
+    Type: String
+    Default: $default
+    Description: >
+      Name of the deployment stage. Use "$default" so the API is invoked
+      without a stage segment in the URL (e.g. /orders/123 instead of
+      /prod/orders/123)
+
+Resources:
+
+  ### --- DB Subnet Group ---
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for demo RDS instances
+      DBSubnetGroupName: !Sub '${ServicePrefix}-db-subnet-group'
+      SubnetIds: !Ref PrivateSubnetIds
+
+  ### --- Log Group for Debugging ---
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/main/${ServicePrefix}'
+      RetentionInDays: 3
+
+  ### --- Orders DB - RDS with AWS managed Secret ---
+
+  OrdersDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ServicePrefix}-orders-db-secret'
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DBUsername}"}'
+        GenerateStringKey: password
+        ExcludePunctuation: true
+        PasswordLength: 20
+
+  OrdersDBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: postgres
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${OrdersDBSecret}:SecretString:password}}'
+      DBName: orders
+      DBInstanceIdentifier: !Sub '${ServicePrefix}-orders-db'
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref RDSSecurityGroupId]
+      BackupRetentionPeriod: 0
+
+  ### --- Users DB - RDS with AWS managed Secret ---
+
+  UsersDBSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: !Sub '${ServicePrefix}-users-db-secret'
+        GenerateSecretString:
+          SecretStringTemplate: !Sub '{"username":"${DBUsername}"}'
+          GenerateStringKey: password
+          ExcludePunctuation: true
+          PasswordLength: 20
+
+  UsersDBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: postgres
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${UsersDBSecret}:SecretString:password}}'
+      DBName: users
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref RDSSecurityGroupId]
+      BackupRetentionPeriod: 0
+  
+  ### --- Products DB - DynamoDB with partition key ---
+
+  ProductsDBInstance:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ServicePrefix}-products'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: product_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: product_key
+          KeyType: HASH
+
+  ### --- ECS Cluster ---
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ServicePrefix}-cluster'
+
+  ### --- IAM roles for task definitions and services (Future Fix: Best practice separates IAM Roles out for each microservice ) ---
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServicePrefix}-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServicePrefix}-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadOrdersDBSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [ !Ref OrdersDBSecret, !Ref UsersDBSecret ]
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ProductsDBInstance.Arn
+        - PolicyName: ReadImagesBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${ImagesBucket.Arn}/*'
+
+  ### --- Orders, users, producst task Definitions
+
+  OrdersTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ServicePrefix}-orders'
+      Cpu: '256'
+      Memory: '512'
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole 
+      TaskRoleArn: !Ref ECSTaskRole
+      ContainerDefinitions:
+        - Name: orders
+          Image: !Ref OrdersImage
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Environment:
+            - Name: DATABASE_HOST
+              Value: !GetAtt OrdersDBInstance.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt OrdersDBInstance.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: orders
+            - Name: DATABASE_USER
+              Value: !Ref DBUsername
+            - Name: DATABASE_SECRET_ARN
+              Value: !Ref OrdersDBSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: 
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: orders
+  
+  UsersTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ServicePrefix}-users'
+      Cpu: '256'
+      Memory: '512'
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole 
+      TaskRoleArn: !Ref ECSTaskRole
+      ContainerDefinitions:
+        - Name: users
+          Image: !Ref UsersImage
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Environment:
+            - Name: DATABASE_HOST
+              Value: !GetAtt UsersDBInstance.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt UsersDBInstance.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: users
+            - Name: DATABASE_USER
+              Value: !Ref DBUsername
+            - Name: DATABASE_SECRET_ARN
+              Value: !Ref UsersDBSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: 
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: users
+
+  ProductsTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ServicePrefix}-products'
+      Cpu: '256'
+      Memory: '512'
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole 
+      TaskRoleArn: !Ref ECSTaskRole
+      ContainerDefinitions:
+        - Name: products
+          Image: !Ref ProductsImage
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Environment:
+            - Name: TABLE_NAME
+              Value: !Ref ProductsDBInstance
+            - Name: KEY_NAME
+              Value: ProductId
+            - Name: BUCKET_NAME
+              Value: !Ref ImagesBucket
+            - Name: QUEUE_URL
+              Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: 
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: products
+
+  ### --- Target Groups For Orders, Users and Products
+
+  OrdersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServicePrefix}-orders-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+
+  UsersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServicePrefix}-users-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+  
+  ProductsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ServicePrefix}-products-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+
+  ### --- Application Load Balancer with Listener and Rules
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ServicePrefix}-alb'
+      Subnets: !Ref PrivateSubnetIds
+      SecurityGroups: [!Ref ALBSecurityGroupId]
+      Scheme: internal
+      Type: application
+  
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '404'
+            ContentType: application/json
+            MessageBody: '{"error": "Not Found"}'
+  
+  OrdersListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/orders*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OrdersTargetGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${ServicePrefix}-orders-rule 
+
+  
+  UsersListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ['/users*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref UsersTargetGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${ServicePrefix}-users-rule 
+  
+  ProductsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values: ['/products*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ProductsTargetGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${ServicePrefix}-products-rule 
+
+  ### --- Orders, Users and Products Services
+  
+  OrdersService:
+    Type: AWS::ECS::Service
+    DependsOn: OrdersListenerRule
+    Properties:
+      ServiceName: !Sub ${ServicePrefix}-orders-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref OrdersTaskDef
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref ECSSecurityGroupId]
+      LoadBalancers:
+        - ContainerName: orders
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref OrdersTargetGroup
+  
+  UsersService:
+    Type: AWS::ECS::Service
+    DependsOn: UsersListenerRule
+    Properties:
+      ServiceName: !Sub ${ServicePrefix}-users-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref UsersTaskDef
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref ECSSecurityGroupId]
+      LoadBalancers:
+        - ContainerName: users
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref UsersTargetGroup
+  
+  ProductsService:
+    Type: AWS::ECS::Service
+    DependsOn: ProductsListenerRule
+    Properties:
+      ServiceName: !Sub ${ServicePrefix}-products-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ProductsTaskDef
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref ECSSecurityGroupId]
+      LoadBalancers:
+        - ContainerName: products
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref ProductsTargetGroup
+
+  ### --- Image upload: S3 + presigned URL Lambda + HTTP API ---
+  ImagesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ['*']
+            AllowedHeaders: ['*']
+
+  PresignedUrlFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3PresignAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub '${ImagesBucket.Arn}/*'
+
+  PresignedUrlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ServicePrefix}-presign'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt PresignedUrlFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref ImagesBucket
+      Code:
+        ZipFile: |
+          const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+          const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+          const s3 = new S3Client({});
+          exports.handler = async (event) => {
+            const qs = event.queryStringParameters || {};
+            const key = qs.key || `uploads/${Date.now()}.jpg`;
+            const command = new PutObjectCommand({ Bucket: process.env.BUCKET_NAME, Key: key });
+            const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+            return {
+              statusCode: 200,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ uploadUrl: url, key }),
+            };
+          };
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ServicePrefix}-api'
+      ProtocolType: HTTP
+      Target: !GetAtt PresignedUrlFunction.Arn
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PresignedUrlFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+
+  ### --- API Gateway with VPC Link and routes to each microservice --- 
+
+  VpcLinkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for API Gateway VPC Link
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: !Ref ALBPort
+          ToPort: !Ref ALBPort
+          DestinationSecurityGroupId: !Ref ALBSecurityGroupId
+          Description: Allow outbound traffic to ALB
+      Tags:
+        - Key: Name
+          Value: !Sub '${ServicePrefix}-vpclink-sg'
+  
+  AlbIngressFromVpcLink:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ALBSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref ALBPort
+      ToPort: !Ref ALBPort
+      SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
+      Description: Allow inbound to ALB from API Gateway VPC Link
+
+  HttpApiVpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties: 
+      Name: !Sub '${ServicePrefix}-vpc-link'
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+
+  HttpApiGateway:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ServicePrefix}-api-gateway'
+      ProtocolType: HTTP
+      Description: HTTP API sending traffic to Orders, Users and Products via ALB
+
+  AlbIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties: 
+      ApiId: !Ref HttpApiGateway
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref HttpApiVpcLink
+      IntegrationUri: !Ref ALBListener
+      PayloadFormatVersion: '1.0'
+      TimeoutInMillis: 29000
+
+  OrdersRoute: 
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiGateway
+      RouteKey: 'ANY /orders/{proxy+}'
+      Target: !Sub 'integrations/${AlbIntegration}'
+
+  UsersRoute: 
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiGateway
+      RouteKey: 'ANY /users/{proxy+}'
+      Target: !Sub 'integrations/${AlbIntegration}'
+
+  ProductsRoute: 
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiGateway
+      RouteKey: 'ANY /products/{proxy+}'
+      Target: !Sub 'integrations/${AlbIntegration}'
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApiGateway
+      StageName: !Ref StageName
+      AutoDeploy: true
+
+
